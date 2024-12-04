@@ -51,9 +51,60 @@ def load_pricing() -> Dict:
 
     if not PRICING_FILE.exists():
         default_pricing = {
-            "gpt-4o-mini": {"input": 0.015, "output": 0.025},
-            "gpt-4": {"input": 0.03, "output": 0.06},
-            "gpt-3.5-turbo": {"input": 0.0015, "output": 0.002},
+            # GPT-4o models
+            "gpt-4o": {
+                "input": 2.50,
+                "input_batch": 1.25,
+                "input_cached": 1.25,
+                "output": 10.00,
+                "output_batch": 5.00
+            },
+            "gpt-4o-2024-11-20": {
+                "input": 2.50,
+                "input_batch": 1.25,
+                "input_cached": 1.25,
+                "output": 10.00,
+                "output_batch": 5.00
+            },
+            "gpt-4o-2024-08-06": {
+                "input": 2.50,
+                "input_batch": 1.25,
+                "input_cached": 1.25,
+                "output": 10.00,
+                "output_batch": 5.00
+            },
+            "gpt-4o-2024-05-13": {
+                "input": 5.00,
+                "input_batch": 2.50,
+                "output": 15.00,
+                "output_batch": 7.50
+            },
+            # GPT-4o mini models
+            "gpt-4o-mini": {
+                "input": 0.150,
+                "input_batch": 0.075,
+                "input_cached": 0.075,
+                "output": 0.600,
+                "output_batch": 0.300
+            },
+            "gpt-4o-mini-2024-07-18": {
+                "input": 0.150,
+                "input_batch": 0.075,
+                "input_cached": 0.075,
+                "output": 0.600,
+                "output_batch": 0.300
+            },
+            # o1-mini models
+            "o1-mini": {
+                "input": 3.00,
+                "input_cached": 1.50,
+                "output": 12.00
+            },
+            "o1-mini-2024-09-12": {
+                "input": 3.00,
+                "input_cached": 1.50,
+                "output": 12.00
+            }
         }
         PRICING_FILE.write_text(json.dumps(default_pricing, indent=2))
         return default_pricing
@@ -72,26 +123,61 @@ def count_tokens(text: str, model: str) -> int:
     return len(encoding.encode(text))
 
 
-def estimate_cost(content_list: List[Tuple[str, Path]], model: str = DEFAULT_MODEL, avg_output_tokens: int = 300) -> float:
+def estimate_cost(
+    content_list: List[Tuple[str, Path]],
+    model: str = DEFAULT_MODEL,
+    avg_output_tokens: int = 300,
+    use_batch: bool = True,
+    assume_cached: bool = False
+) -> dict:
+    """
+    Estimate processing costs with detailed breakdown.
+    Returns a dictionary with cost details.
+    """
     pricing = load_pricing()
 
     if model not in pricing:
         raise ValueError(
-            "Pricing information for model {} is not available. "
-            "Please update {} with current pricing.".format(
+            "Pricing information for model {} is not available. Please update {} with current pricing.".format(
                 model, PRICING_FILE)
         )
 
-    input_token_cost = pricing[model]["input"] / 1000
-    output_token_cost = pricing[model]["output"] / 1000
+    model_pricing = pricing[model]
+
+    # Determine input cost based on batch/cache status
+    if assume_cached and "input_cached" in model_pricing:
+        input_token_cost = model_pricing["input_cached"] / 1_000_000
+    elif use_batch and "input_batch" in model_pricing:
+        input_token_cost = model_pricing["input_batch"] / 1_000_000
+    else:
+        input_token_cost = model_pricing["input"] / 1_000_000
+
+    # Determine output cost
+    output_token_cost = (
+        model_pricing["output_batch"] / 1_000_000 if use_batch and "output_batch" in model_pricing
+        else model_pricing["output"] / 1_000_000
+    )
 
     total_input_tokens = sum(count_tokens(content, model)
                              for content, _ in content_list)
     total_output_tokens = len(content_list) * avg_output_tokens
 
-    total_cost = (total_input_tokens * input_token_cost) + \
-        (total_output_tokens * output_token_cost)
-    return total_cost
+    input_cost = total_input_tokens * input_token_cost
+    output_cost = total_output_tokens * output_token_cost
+    total_cost = input_cost + output_cost
+
+    return {
+        "total_cost": total_cost,
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "pricing_type": (
+            "cached" if assume_cached else
+            "batch" if use_batch else
+            "standard"
+        )
+    }
 
 
 def save_path_to_file(path: Path) -> None:
@@ -287,14 +373,45 @@ def tidy_graph(
 
     total_files = len(content_list)
     sample_size = min(3, total_files)
-    estimated_total_cost = estimate_cost(content_list, model=model)
-    estimated_sample_cost = estimated_total_cost * (sample_size / total_files)
+    # Get cost estimates for different scenarios
+    standard_cost = estimate_cost(
+        content_list, model=model, use_batch=False, assume_cached=False)
+    batch_cost = estimate_cost(
+        content_list, model=model, use_batch=True, assume_cached=False)
+    cached_cost = estimate_cost(
+        content_list, model=model, use_batch=True, assume_cached=True)
+
+    # Calculate sample costs
+    sample_ratio = sample_size / total_files
+    sample_standard = {k: v * sample_ratio if isinstance(v, (int, float)) else v
+                       for k, v in standard_cost.items()}
+    sample_batch = {k: v * sample_ratio if isinstance(v, (int, float)) else v
+                    for k, v in batch_cost.items()}
+
+    # Load pricing data
+    pricing = load_pricing()
 
     typer.echo("\nEstimated costs:")
-    typer.echo("Sample processing ({} files): ${:.3f}".format(
-        sample_size, estimated_sample_cost))
-    typer.echo("Full graph processing ({} files): ${:.2f}".format(
-        total_files, estimated_total_cost))
+    typer.echo("\nSample processing ({} files):".format(sample_size))
+    typer.echo("  Standard: ${:.3f}".format(sample_standard["total_cost"]))
+    if model in pricing and "input_batch" in pricing[model]:
+        typer.echo("  With Batch API: ${:.3f}".format(
+            sample_batch["total_cost"]))
+
+    typer.echo("\nFull graph processing ({} files):".format(total_files))
+    typer.echo("  Standard: ${:.2f}".format(standard_cost["total_cost"]))
+    if model in pricing and "input_batch" in pricing[model]:
+        typer.echo("  With Batch API: ${:.2f}".format(
+            batch_cost["total_cost"]))
+        if "input_cached" in pricing[model]:
+            typer.echo(
+                "  With Batch API + Cache: ${:.2f}".format(cached_cost["total_cost"]))
+
+    typer.echo("\nToken Usage:")
+    typer.echo("  Input tokens: {:,}".format(
+        standard_cost["total_input_tokens"]))
+    typer.echo("  Estimated output tokens: {:,}".format(
+        standard_cost["total_output_tokens"]))
 
     try_sample = typer.confirm(
         "\nWould you like to process a small sample first?")

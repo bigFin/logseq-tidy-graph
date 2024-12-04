@@ -49,6 +49,8 @@ You are tasked with rewriting a Logseq page into a professional Architectural De
   - Decision: The specific choice or action taken.
   - Consequences: Any impacts, benefits, or trade-offs resulting from the decision.
 - Preserve and improve [[backlinks]] and #hashtags.
+- Preserve web links
+- Preserve links to local assets and inline images ![image.png](../assets/image.png)
 - Rewrite informal language or personal commentary into a professional tone suitable for sharing.
 - Do not hallucinate
 - Add a #Review tag for content that may still need human attention.
