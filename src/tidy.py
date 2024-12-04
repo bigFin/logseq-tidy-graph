@@ -50,6 +50,7 @@ You are tasked with rewriting a Logseq page into a professional Architectural De
   - Consequences: Any impacts, benefits, or trade-offs resulting from the decision.
 - Preserve and improve [[backlinks]] and #hashtags.
 - Rewrite informal language or personal commentary into a professional tone suitable for sharing.
+- Do not hallucinate
 - Add a #Review tag for content that may still need human attention.
 - Use these extracted tags and backlinks where relevant:
 {}
