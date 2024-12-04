@@ -278,10 +278,14 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TaskProgressColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         console=console,
     ) as progress:
-        overall_task = progress.add_task(
-            "[cyan]Processing files...", total=total_files)
+        # Add two progress bars: one for overall progress and one for current file
+        overall_progress = progress.add_task(
+            "[bold blue]Overall Progress", total=total_files)
+        file_progress = progress.add_task(
+            "[cyan]Current File", total=total_files, visible=True)
 
         batch_size = 20
         for i in range(0, len(content_list), batch_size):
@@ -289,6 +293,12 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
 
             # Process each file in the batch
             for content, file_path in batch:
+                # Update the current file progress description
+                progress.update(
+                    file_progress,
+                    description=f"[cyan]Processing: {file_path.name}"
+                )
+
                 success = await process_single_file(
                     content=content,
                     file_path=file_path,
@@ -296,7 +306,7 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
                     tags=tags,
                     model=model,
                     progress=progress,
-                    task_id=overall_task,
+                    task_id=file_progress,
                     console=console
                 )
 
@@ -304,6 +314,11 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
                     successful_files += 1
                 else:
                     failed_files.append(file_path)
+
+                # Update overall progress
+                progress.update(overall_progress, advance=1)
+                # Reset file progress for next file
+                progress.update(file_progress, completed=0)
 
             # Check if user wants to continue after failures
             if len(failed_files) > 0 and (i + batch_size) < len(content_list):
