@@ -107,8 +107,13 @@ async def process_single_file(
         # Process the file
         async for result in tidy.tidy_content_batch_stream([(content, tags)], model=model, batch_size=1):
             if result:
+                # Determine the output path maintaining directory structure
+                if 'journals' in str(file_path):
+                    rel_path = Path('journals') / file_path.name
+                else:
+                    rel_path = Path('pages') / file_path.name
+
                 # Save the result
-                rel_path = file_path.relative_to(file_path.parent.parent)
                 output_file = output_path / rel_path
                 output_file.parent.mkdir(parents=True, exist_ok=True)
                 output_file.write_text(result)
@@ -168,56 +173,10 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
                 else:
                     failed_files.append(file_path)
 
-            # Check if user wants to continue after each batch
+            # Check if user wants to continue after failures
             if len(failed_files) > 0 and (i + batch_size) < len(content_list):
                 if not typer.confirm("\nContinue processing remaining files?", default=True):
-                    raise typer.Abort("Processing cancelled by user")
 
-            try:
-                batch_results = {}  # Placeholder for batch_results logic
-                for result, file_path in zip(batch_results.keys(), batch_results.values()):
-                    try:
-                        rel_path = file_path.relative_to(
-                            file_path.parent.parent)
-                        output_file = output_path / rel_path
-                        output_file.parent.mkdir(parents=True, exist_ok=True)
-                        output_file.write_text(result)
-                        successful_files += 1
-                        console.print(
-                            "[green]Successfully processed: {}".format(rel_path))
-                    except Exception as e:
-                        console.print(
-                            "[red]Error saving file {}: {}".format(file_path, str(e)))
-                        failed_files.append(file_path)
-
-                progress.update(overall_task, advance=len(batch))
-
-            except Exception as e:
-                console.print(
-                    "\n[red]Batch processing error: {}".format(str(e)))
-                console.print("[yellow]Details:")
-                console.print("  - Batch size: {} files".format(len(batch)))
-                console.print(
-                    "  - Successfully received: {} results".format(len(batch_results)))
-                console.print(
-                    "  - Missing: {} files".format(len(batch) - len(batch_results)))
-
-                for result, file_path in zip(batch_results.keys(), batch_results.values()):
-                    try:
-                        rel_path = file_path.relative_to(
-                            file_path.parent.parent)
-                        output_file = output_path / rel_path
-                        output_file.parent.mkdir(parents=True, exist_ok=True)
-                        output_file.write_text(result)
-                        successful_files += 1
-                        console.print(
-                            "[green]Successfully processed: {}".format(rel_path))
-                    except Exception as e:
-                        console.print(
-                            "[red]Error saving file {}: {}".format(file_path, str(e)))
-                        failed_files.append(file_path)
-
-                if not typer.confirm("\nContinue processing remaining files?", default=True):
                     raise typer.Abort("Processing cancelled by user")
 
         console.print("\n[bold]Processing Complete!")
