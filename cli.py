@@ -7,6 +7,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.console import Console
 from src.processor import process_graph, extract_tags, save_tags_to_file
+from src import tidy
 from src.validator import validate_and_clean_paths, select_path
 import tiktoken
 from typing import List, Tuple
@@ -30,7 +31,7 @@ def count_tokens(text: str, model: str) -> int:
     return len(encoding.encode(text))
 
 
-def estimate_cost(content_list: list, model: str = DEFAULT_MODEL, avg_output_tokens: int = 300) -> float:
+def estimate_cost(content_list: List[Tuple[str, Path]], model: str = DEFAULT_MODEL, avg_output_tokens: int = 300) -> float:
     if model not in PRICING:
         raise ValueError(
             "Pricing information for model {} is not available.".format(model))
@@ -39,7 +40,7 @@ def estimate_cost(content_list: list, model: str = DEFAULT_MODEL, avg_output_tok
     output_token_cost = PRICING[model]["output"] / 1000
 
     total_input_tokens = sum(count_tokens(content, model)
-                             for content in content_list)
+                             for content, _ in content_list)
     total_output_tokens = len(content_list) * avg_output_tokens
 
     total_cost = (total_input_tokens * input_token_cost) + \
@@ -88,10 +89,16 @@ def select_path_interactively(start_dir: Path = Path(".")) -> Path:
 
 
 async def process_files_with_progress(content_list: List[Tuple[str, Path]], output_path: Path, tags: set, model: str):
+    """
+    Process files with progress monitoring.
+    """
     console = Console()
     total_files = len(content_list)
-    processed_files = 0
+    successful_files = 0
     failed_files = []
+
+    # Ensure output directory exists
+    output_path.mkdir(parents=True, exist_ok=True)
 
     progress_table = Table.grid()
     progress_table.add_row("[bold]Processing Logseq Graph Files")
@@ -111,31 +118,69 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
             batch = content_list[i:i + batch_size]
 
             try:
+                # Prepare batch contents
                 batch_contents = [(content, tags) for content, _ in batch]
-                async for result in tidy_content_batch_stream(batch_contents, model=model, batch_size=batch_size):
-                    file_path = batch[processed_files][1]
-                    output_file = output_path / \
-                        file_path.relative_to(file_path.parent.parent)
-                    output_file.parent.mkdir(parents=True, exist_ok=True)
-                    output_file.write_text(result)
 
-                    processed_files += 1
-                    progress.update(overall_task, advance=1)
+                # Create a list to store all results as they come in
+                results = []
+                file_paths = []
+
+                # Process the batch and collect results
+                async for result in tidy.tidy_content_batch_stream(batch_contents, model=model, batch_size=batch_size):
+                    results.append(result)
+                    file_paths.append(batch[len(results)-1][1])
+
+                    # Update progress for each received result
+                    progress.update(
+                        overall_task, advance=0, description="Processing... {}/{} results".format(len(results), len(batch)))
+
+                # Process whatever results we got, even if incomplete
+                for idx, (result, file_path) in enumerate(zip(results, file_paths)):
+                    try:
+                        # Create the full directory structure
+                        rel_path = file_path.relative_to(
+                            file_path.parent.parent)
+                        output_file = output_path / rel_path
+                        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Write the content
+                        output_file.write_text(result)
+                        successful_files += 1
+                        progress.update(overall_task, advance=1)
+
+                        # Log success
+                        console.print(
+                            "[green]Successfully processed: {}".format(rel_path))
+                    except Exception as e:
+                        console.print(
+                            "[red]Error saving file {}: {}".format(file_path, str(e)))
+                        failed_files.append(file_path)
+                progress.update(overall_task, advance=1)
 
             except Exception as e:
-                failed_files.extend([f[1] for f in batch])
-                console.print("[red]Error processing batch: {}".format(str(e)))
-                processed_files += len(batch)
-                progress.update(overall_task, advance=len(batch))
+                console.print("[red]Batch processing error: {}".format(str(e)))
+                # Only mark as failed the files that weren't successfully processed
+                processed_paths = set(file_paths)
+                for content, path in batch:
+                    if path not in processed_paths:
+                        failed_files.append(path)
+                # Update progress for remaining files in batch
+                remaining = len(batch) - len(results)
+                if remaining > 0:
+                    progress.update(overall_task, advance=remaining)
 
+        # Final status report after all batches are processed
     console.print("\n[bold]Processing Complete!")
     console.print(
-        "Successfully processed: {} files".format(processed_files - len(failed_files)))
+        "Successfully processed: {} files".format(successful_files))
     if failed_files:
         console.print(
             "[red]Failed to process {} files:".format(len(failed_files)))
         for file in failed_files:
             console.print("[red]  - {}".format(file))
+
+    if successful_files == 0 and failed_files:
+        console.print("\n[red]Warning: No files were successfully processed!")
 
 
 @app.command("tidy-graph")
@@ -173,10 +218,11 @@ def tidy_graph(
     pages_dir = graph_path / "pages"
     content_list = []
 
-    for file_path in journals_dir.glob("*.md"):
-        content_list.append(file_path.read_text())
-    for file_path in pages_dir.glob("*.md"):
-        content_list.append(file_path.read_text())
+    # Collect content with their file paths
+    for dir_path in [journals_dir, pages_dir]:
+        if dir_path.exists():
+            for file_path in dir_path.glob("*.md"):
+                content_list.append((file_path.read_text(), file_path))
 
     # Offer to process a sample first
     total_files = len(content_list)
@@ -186,9 +232,9 @@ def tidy_graph(
 
     typer.echo("\nEstimated costs:")
     typer.echo(
-        f"Sample processing ({sample_size} files): ${estimated_sample_cost:.3f}")
+        "Sample processing ({} files): ${:.3f}".format(sample_size, estimated_sample_cost))
     typer.echo(
-        f"Full graph processing ({total_files} files): ${estimated_total_cost:.2f}")
+        "Full graph processing ({} files): ${:.2f}".format(total_files, estimated_total_cost))
 
     try_sample = typer.confirm(
         "\nWould you like to process a small sample first?")
@@ -200,11 +246,18 @@ def tidy_graph(
         # Select a representative sample (mix of journals and pages if possible)
         sample_content = []
         pages_sample = [c for c in content_list if 'pages' in str(
-            c[1])][:sample_size//2]
-        journals_sample = [
-            c for c in content_list if 'journals' in str(c[1])][:sample_size//2]
-        sample_content.extend(pages_sample)
-        sample_content.extend(journals_sample)
+            c[1].parent)][:sample_size//2]
+        journals_sample = [c for c in content_list if 'journals' in str(
+            c[1].parent)][:sample_size//2]
+
+        # Ensure we have some content even if one category is empty
+        if not pages_sample and not journals_sample:
+            sample_content = content_list[:sample_size]
+        else:
+            sample_content.extend(pages_sample)
+            remaining_slots = sample_size - len(sample_content)
+            if remaining_slots > 0:
+                sample_content.extend(journals_sample[:remaining_slots])
 
         if not sample_content:  # If no split possible, just take first few
             sample_content = content_list[:sample_size]
@@ -220,10 +273,20 @@ def tidy_graph(
 
         # Open sample files in default editor if requested
         if typer.confirm("Would you like to view the processed sample files?"):
+            successful_files = []
             for _, file_path in sample_content:
                 sample_file = temp_output / \
                     file_path.relative_to(file_path.parent.parent)
-                typer.launch(str(sample_file))
+                if sample_file.exists():
+                    successful_files.append(sample_file)
+                    typer.launch(str(sample_file))
+
+            if not successful_files:
+                typer.echo(
+                    "[red]No successfully processed files found to view.")
+            else:
+                typer.echo("Opened {} processed files for review.".format(
+                    len(successful_files)))
 
         proceed = typer.confirm(
             "\nWould you like to proceed with processing the entire graph?")

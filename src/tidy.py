@@ -1,8 +1,11 @@
-import openai
+from openai import AsyncOpenAI
 from typing import Set, List, Dict, Tuple, Generator, AsyncGenerator
 import re
 import asyncio
 from itertools import islice
+
+# Initialize the AsyncOpenAI client
+client = AsyncOpenAI()
 
 
 async def tidy_content_batch_stream(contents: List[Tuple[str, Set[str]]],
@@ -59,16 +62,17 @@ Content to rewrite:
 
         try:
             # Send batch request to OpenAI
-            response = await openai.ChatCompletion.acreate(
+            response = await client.chat.completions.create(
                 model=model,
-                messages=prepared_contents,
+                messages=[{"role": "system", "content": content["content"]}
+                          for content in prepared_contents]
             )
 
             # Process results
             results = []
-            for idx, choice in enumerate(response["choices"]):
+            for idx, choice in enumerate(response.choices):
                 properties, queries = preserved_elements[idx]
-                tidied_content = choice["message"]["content"]
+                tidied_content = choice.message.content
 
                 # Reinsert queries and properties
                 result = "\n".join(properties) + "\n" + \
