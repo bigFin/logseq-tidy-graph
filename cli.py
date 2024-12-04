@@ -88,10 +88,46 @@ def select_path_interactively(start_dir: Path = Path(".")) -> Path:
                 typer.echo("Please select a directory, not a file.")
 
 
+async def process_single_file(
+    content: str,
+    file_path: Path,
+    output_path: Path,
+    tags: set,
+    model: str,
+    progress,
+    task_id,
+    console: Console
+) -> bool:
+    """Process a single file and return True if successful."""
+    try:
+        # Update progress
+        progress.update(
+            task_id, description="Processing: {}".format(file_path.name))
+
+        # Process the file
+        async for result in tidy.tidy_content_batch_stream([(content, tags)], model=model, batch_size=1):
+            if result:
+                # Save the result
+                rel_path = file_path.relative_to(file_path.parent.parent)
+                output_file = output_path / rel_path
+                output_file.parent.mkdir(parents=True, exist_ok=True)
+                output_file.write_text(result)
+
+                console.print(
+                    "[green]Successfully processed: {}".format(rel_path))
+                progress.update(task_id, advance=1)
+                return True
+
+        raise RuntimeError("No result received for {}".format(file_path.name))
+
+    except Exception as e:
+        console.print("[red]Error processing {}: {}".format(file_path, str(e)))
+        progress.update(task_id, advance=1)
+        return False
+
+
 async def process_files_with_progress(content_list: List[Tuple[str, Path]], output_path: Path, tags: set, model: str):
-    """
-    Process files with progress monitoring.
-    """
+    """Process files with progress monitoring."""
     console = Console()
     total_files = len(content_list)
     successful_files = 0
@@ -99,9 +135,6 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
 
     # Ensure output directory exists
     output_path.mkdir(parents=True, exist_ok=True)
-
-    progress_table = Table.grid()
-    progress_table.add_row("[bold]Processing Logseq Graph Files")
 
     with Progress(
         SpinnerColumn(),
@@ -111,75 +144,93 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
         console=console,
     ) as progress:
         overall_task = progress.add_task(
-            "[cyan]Processing {} files...".format(total_files), total=total_files)
+            "[cyan]Processing files...", total=total_files)
 
         batch_size = 20
         for i in range(0, len(content_list), batch_size):
             batch = content_list[i:i + batch_size]
 
+            # Process each file in the batch
+            for content, file_path in batch:
+                success = await process_single_file(
+                    content=content,
+                    file_path=file_path,
+                    output_path=output_path,
+                    tags=tags,
+                    model=model,
+                    progress=progress,
+                    task_id=overall_task,
+                    console=console
+                )
+
+                if success:
+                    successful_files += 1
+                else:
+                    failed_files.append(file_path)
+
+            # Check if user wants to continue after each batch
+            if len(failed_files) > 0 and (i + batch_size) < len(content_list):
+                if not typer.confirm("\nContinue processing remaining files?", default=True):
+                    raise typer.Abort("Processing cancelled by user")
+
             try:
-                # Prepare batch contents
-                batch_contents = [(content, tags) for content, _ in batch]
-
-                # Create a list to store all results as they come in
-                results = []
-                file_paths = []
-
-                # Process the batch and collect results
-                async for result in tidy.tidy_content_batch_stream(batch_contents, model=model, batch_size=batch_size):
-                    results.append(result)
-                    file_paths.append(batch[len(results)-1][1])
-
-                    # Update progress for each received result
-                    progress.update(
-                        overall_task, advance=0, description="Processing... {}/{} results".format(len(results), len(batch)))
-
-                # Process whatever results we got, even if incomplete
-                for idx, (result, file_path) in enumerate(zip(results, file_paths)):
+                batch_results = {}  # Placeholder for batch_results logic
+                for result, file_path in zip(batch_results.keys(), batch_results.values()):
                     try:
-                        # Create the full directory structure
                         rel_path = file_path.relative_to(
                             file_path.parent.parent)
                         output_file = output_path / rel_path
                         output_file.parent.mkdir(parents=True, exist_ok=True)
-
-                        # Write the content
                         output_file.write_text(result)
                         successful_files += 1
-                        progress.update(overall_task, advance=1)
-
-                        # Log success
                         console.print(
                             "[green]Successfully processed: {}".format(rel_path))
                     except Exception as e:
                         console.print(
                             "[red]Error saving file {}: {}".format(file_path, str(e)))
                         failed_files.append(file_path)
-                progress.update(overall_task, advance=1)
+
+                progress.update(overall_task, advance=len(batch))
 
             except Exception as e:
-                console.print("[red]Batch processing error: {}".format(str(e)))
-                # Only mark as failed the files that weren't successfully processed
-                processed_paths = set(file_paths)
-                for content, path in batch:
-                    if path not in processed_paths:
-                        failed_files.append(path)
-                # Update progress for remaining files in batch
-                remaining = len(batch) - len(results)
-                if remaining > 0:
-                    progress.update(overall_task, advance=remaining)
+                console.print(
+                    "\n[red]Batch processing error: {}".format(str(e)))
+                console.print("[yellow]Details:")
+                console.print("  - Batch size: {} files".format(len(batch)))
+                console.print(
+                    "  - Successfully received: {} results".format(len(batch_results)))
+                console.print(
+                    "  - Missing: {} files".format(len(batch) - len(batch_results)))
 
-        # Final status report after all batches are processed
-    console.print("\n[bold]Processing Complete!")
-    console.print(
-        "Successfully processed: {} files".format(successful_files))
-    if failed_files:
+                for result, file_path in zip(batch_results.keys(), batch_results.values()):
+                    try:
+                        rel_path = file_path.relative_to(
+                            file_path.parent.parent)
+                        output_file = output_path / rel_path
+                        output_file.parent.mkdir(parents=True, exist_ok=True)
+                        output_file.write_text(result)
+                        successful_files += 1
+                        console.print(
+                            "[green]Successfully processed: {}".format(rel_path))
+                    except Exception as e:
+                        console.print(
+                            "[red]Error saving file {}: {}".format(file_path, str(e)))
+                        failed_files.append(file_path)
+
+                if not typer.confirm("\nContinue processing remaining files?", default=True):
+                    raise typer.Abort("Processing cancelled by user")
+
+        console.print("\n[bold]Processing Complete!")
         console.print(
-            "[red]Failed to process {} files:".format(len(failed_files)))
-        for file in failed_files:
-            console.print("[red]  - {}".format(file))
+            "Successfully processed: {} files".format(successful_files))
 
-    if successful_files == 0 and failed_files:
+        if failed_files:
+            console.print(
+                "[red]Failed to process {} files:".format(len(failed_files)))
+            for file in failed_files:
+                console.print("[red]  - {}".format(file))
+
+    if successful_files == 0:
         console.print("\n[red]Warning: No files were successfully processed!")
 
 
@@ -192,7 +243,6 @@ def tidy_graph(
 
     typer.echo("Select a Logseq graph:")
     if valid_paths:
-        # Convert Path objects to strings and add the new path option
         choices = [str(path) for path in valid_paths] + ["[Enter a new path]"]
         selected = questionary.select(
             "Choose a graph or navigate to a new one:", choices=choices
@@ -218,39 +268,34 @@ def tidy_graph(
     pages_dir = graph_path / "pages"
     content_list = []
 
-    # Collect content with their file paths
     for dir_path in [journals_dir, pages_dir]:
         if dir_path.exists():
             for file_path in dir_path.glob("*.md"):
                 content_list.append((file_path.read_text(), file_path))
 
-    # Offer to process a sample first
     total_files = len(content_list)
-    sample_size = min(3, total_files)  # Process up to 3 files as a sample
+    sample_size = min(3, total_files)
     estimated_total_cost = estimate_cost(content_list, model=model)
     estimated_sample_cost = estimated_total_cost * (sample_size / total_files)
 
     typer.echo("\nEstimated costs:")
-    typer.echo(
-        "Sample processing ({} files): ${:.3f}".format(sample_size, estimated_sample_cost))
-    typer.echo(
-        "Full graph processing ({} files): ${:.2f}".format(total_files, estimated_total_cost))
+    typer.echo("Sample processing ({} files): ${:.3f}".format(
+        sample_size, estimated_sample_cost))
+    typer.echo("Full graph processing ({} files): ${:.2f}".format(
+        total_files, estimated_total_cost))
 
     try_sample = typer.confirm(
         "\nWould you like to process a small sample first?")
     if try_sample:
-        # Create temporary output directory for sample
         temp_output = Path("./sample_output")
         temp_output.mkdir(exist_ok=True)
 
-        # Select a representative sample (mix of journals and pages if possible)
         sample_content = []
         pages_sample = [c for c in content_list if 'pages' in str(
             c[1].parent)][:sample_size//2]
         journals_sample = [c for c in content_list if 'journals' in str(
             c[1].parent)][:sample_size//2]
 
-        # Ensure we have some content even if one category is empty
         if not pages_sample and not journals_sample:
             sample_content = content_list[:sample_size]
         else:
@@ -259,19 +304,17 @@ def tidy_graph(
             if remaining_slots > 0:
                 sample_content.extend(journals_sample[:remaining_slots])
 
-        if not sample_content:  # If no split possible, just take first few
+        if not sample_content:
             sample_content = content_list[:sample_size]
 
         typer.echo("\nProcessing sample files...")
         asyncio.run(process_files_with_progress(
             sample_content, temp_output, tags, model))
 
-        # Show sample results
         typer.echo("\nSample results have been saved to ./sample_output")
         typer.echo(
             "Please review the processed files and decide if you want to continue.")
 
-        # Open sample files in default editor if requested
         if typer.confirm("Would you like to view the processed sample files?"):
             successful_files = []
             for _, file_path in sample_content:
