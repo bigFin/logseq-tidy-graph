@@ -1,3 +1,5 @@
+tiktoken
+questionary
 requests
 typer
 openai
