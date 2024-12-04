@@ -33,9 +33,6 @@ async def fetch_model_pricing() -> Dict:
             async with session.get("https://api.openai.com/v1/models") as response:
                 if response.status == 200:
                     models_data = await response.json()
-                    # Process and extract pricing information
-                    # Note: OpenAI doesn't currently provide pricing in their API
-                    # This is a placeholder for when/if they do
                     return {}
     except Exception as e:
         console = Console()
@@ -51,7 +48,6 @@ def load_pricing() -> Dict:
 
     if not PRICING_FILE.exists():
         default_pricing = {
-            # GPT-4o models
             "gpt-4o": {
                 "input": 2.50,
                 "input_batch": 1.25,
@@ -79,7 +75,6 @@ def load_pricing() -> Dict:
                 "output": 15.00,
                 "output_batch": 7.50
             },
-            # GPT-4o mini models
             "gpt-4o-mini": {
                 "input": 0.150,
                 "input_batch": 0.075,
@@ -94,7 +89,6 @@ def load_pricing() -> Dict:
                 "output": 0.600,
                 "output_batch": 0.300
             },
-            # o1-mini models
             "o1-mini": {
                 "input": 3.00,
                 "input_cached": 1.50,
@@ -144,7 +138,6 @@ def estimate_cost(
 
     model_pricing = pricing[model]
 
-    # Determine input cost based on batch/cache status
     if assume_cached and "input_cached" in model_pricing:
         input_token_cost = model_pricing["input_cached"] / 1_000_000
     elif use_batch and "input_batch" in model_pricing:
@@ -152,7 +145,6 @@ def estimate_cost(
     else:
         input_token_cost = model_pricing["input"] / 1_000_000
 
-    # Determine output cost
     output_token_cost = (
         model_pricing["output_batch"] / 1_000_000 if use_batch and "output_batch" in model_pricing
         else model_pricing["output"] / 1_000_000
@@ -232,20 +224,16 @@ async def process_single_file(
 ) -> bool:
     """Process a single file and return True if successful."""
     try:
-        # Update progress
         progress.update(
             task_id, description="Processing: {}".format(file_path.name))
 
-        # Process the file
         async for result in tidy.tidy_content_batch_stream([(content, tags)], model=model, batch_size=1):
             if result:
-                # Determine the output path maintaining directory structure
                 if 'journals' in str(file_path):
                     rel_path = Path('journals') / file_path.name
                 else:
                     rel_path = Path('pages') / file_path.name
 
-                # Save the result
                 output_file = output_path / rel_path
                 output_file.parent.mkdir(parents=True, exist_ok=True)
                 output_file.write_text(result)
@@ -270,7 +258,6 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
     successful_files = 0
     failed_files = []
 
-    # Ensure output directory exists
     output_path.mkdir(parents=True, exist_ok=True)
 
     with Progress(
@@ -281,7 +268,6 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         console=console,
     ) as progress:
-        # Add two progress bars: one for overall progress and one for current file
         overall_progress = progress.add_task(
             "[bold blue]Overall Progress", total=total_files)
         file_progress = progress.add_task(
@@ -291,15 +277,9 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
         for i in range(0, len(content_list), batch_size):
             batch = content_list[i:i + batch_size]
 
-            # Process each file in the batch
+            tasks = []
             for content, file_path in batch:
-                # Update the current file progress description
-                progress.update(
-                    file_progress,
-                    description=f"[cyan]Processing: {file_path.name}"
-                )
-
-                success = await process_single_file(
+                task = process_single_file(
                     content=content,
                     file_path=file_path,
                     output_path=output_path,
@@ -309,21 +289,24 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
                     task_id=file_progress,
                     console=console
                 )
+                tasks.append((task, file_path))
 
-                if success:
+            results = await asyncio.gather(*(task for task, _ in tasks), return_exceptions=True)
+
+            for (_, file_path), result in zip(tasks, results):
+                if isinstance(result, Exception):
+                    console.print(
+                        f"[red]Error processing {file_path}: {str(result)}")
+                    failed_files.append(file_path)
+                elif result:
                     successful_files += 1
                 else:
                     failed_files.append(file_path)
 
-                # Update overall progress
                 progress.update(overall_progress, advance=1)
-                # Reset file progress for next file
-                progress.update(file_progress, completed=0)
 
-            # Check if user wants to continue after failures
             if len(failed_files) > 0 and (i + batch_size) < len(content_list):
                 if not typer.confirm("\nContinue processing remaining files?", default=True):
-
                     raise typer.Abort("Processing cancelled by user")
 
         console.print("\n[bold]Processing Complete!")
@@ -388,7 +371,7 @@ def tidy_graph(
 
     total_files = len(content_list)
     sample_size = min(3, total_files)
-    # Get cost estimates for different scenarios
+
     standard_cost = estimate_cost(
         content_list, model=model, use_batch=False, assume_cached=False)
     batch_cost = estimate_cost(
@@ -396,14 +379,12 @@ def tidy_graph(
     cached_cost = estimate_cost(
         content_list, model=model, use_batch=True, assume_cached=True)
 
-    # Calculate sample costs
     sample_ratio = sample_size / total_files
     sample_standard = {k: v * sample_ratio if isinstance(v, (int, float)) else v
                        for k, v in standard_cost.items()}
     sample_batch = {k: v * sample_ratio if isinstance(v, (int, float)) else v
                     for k, v in batch_cost.items()}
 
-    # Load pricing data
     pricing = load_pricing()
 
     typer.echo("\nEstimated costs:")
