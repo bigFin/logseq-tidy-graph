@@ -575,6 +575,18 @@ def tidy_graph(
 
     asyncio.run(process_files_with_progress(
         content_list, output_path, tags, model))
+
+    # Copy assets folder if it exists
+    src_assets = graph_path / "assets"
+    if src_assets.exists():
+        from shutil import copytree
+        dst_assets = output_path / "assets"
+        try:
+            copytree(src_assets, dst_assets, dirs_exist_ok=True)
+            typer.echo("Assets folder copied successfully")
+        except Exception as e:
+            typer.echo(f"Warning: Failed to copy assets folder: {e}", err=True)
+
     typer.echo("Tidied graph has been saved to {}".format(output_path))
 
 
