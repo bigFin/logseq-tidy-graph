@@ -1,6 +1,9 @@
 import aiohttp
 import json
 from typing import Dict, Optional
+import asyncio
+from asyncio import Semaphore
+from datetime import datetime, timedelta
 import typer
 import asyncio
 from pathlib import Path
@@ -20,7 +23,8 @@ app = typer.Typer()
 
 DEFAULT_MODEL = "gpt-4o-mini"
 
-PATHS_FILE = Path("./paths.txt")
+INPUT_PATHS_FILE = Path("./input_paths.txt")
+OUTPUT_PATHS_FILE = Path("./output_paths.txt")
 
 CONFIG_DIR = Path("config")
 PRICING_FILE = CONFIG_DIR / "model_pricing.json"
@@ -172,18 +176,26 @@ def estimate_cost(
     }
 
 
-def save_path_to_file(path: Path) -> None:
+def save_path_to_file(path: Path, paths_file: Path) -> None:
     path_str = str(path.resolve())
     try:
         existing_paths = set()
-        if PATHS_FILE.exists():
-            existing_paths = set(PATHS_FILE.read_text().splitlines())
+        if paths_file.exists():
+            existing_paths = set(paths_file.read_text().splitlines())
 
         if path_str not in existing_paths:
-            with PATHS_FILE.open('a') as f:
+            with paths_file.open('a') as f:
                 f.write("{}\n".format(path_str))
     except Exception as e:
         typer.echo("Warning: Could not save path to file: {}".format(e), err=True)
+
+
+def generate_output_name(input_path: Path) -> str:
+    """Generate output graph name based on input path and current datetime."""
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    input_name = input_path.name
+    return f"{input_name}_tidy_{timestamp}"
 
 
 def select_path_interactively(start_dir: Path = Path(".")) -> Path:
@@ -212,6 +224,48 @@ def select_path_interactively(start_dir: Path = Path(".")) -> Path:
                 typer.echo("Please select a directory, not a file.")
 
 
+# Rate limit settings (adjust these based on your OpenAI API tier)
+RPM_LIMIT = 500  # Requests per minute
+TPM_LIMIT = 150000  # Tokens per minute
+MAX_PARALLEL_REQUESTS = 15  # Maximum parallel requests
+
+
+class RateLimiter:
+    def __init__(self, rpm_limit: int, tpm_limit: int):
+        self.rpm_limit = rpm_limit
+        self.tpm_limit = tpm_limit
+        self.requests = []
+        self.tokens = []
+        self.semaphore = Semaphore(MAX_PARALLEL_REQUESTS)
+
+    async def acquire(self, tokens: int):
+        now = datetime.now()
+        minute_ago = now - timedelta(minutes=1)
+
+        # Clean up old entries
+        self.requests = [t for t in self.requests if t > minute_ago]
+        self.tokens = [(t, tok) for t, tok in self.tokens if t > minute_ago]
+
+        # Check rate limits
+        while len(self.requests) >= self.rpm_limit or sum(tok for _, tok in self.tokens) >= self.tpm_limit:
+            await asyncio.sleep(0.1)
+            now = datetime.now()
+            minute_ago = now - timedelta(minutes=1)
+            self.requests = [t for t in self.requests if t > minute_ago]
+            self.tokens = [(t, tok)
+                           for t, tok in self.tokens if t > minute_ago]
+
+        # Acquire semaphore for parallel request limiting
+        await self.semaphore.acquire()
+
+        # Record this request
+        self.requests.append(now)
+        self.tokens.append((now, tokens))
+
+    def release(self):
+        self.semaphore.release()
+
+
 async def process_single_file(
     content: str,
     file_path: Path,
@@ -220,28 +274,37 @@ async def process_single_file(
     model: str,
     progress,
     task_id,
-    console: Console
+    console: Console,
+    rate_limiter: RateLimiter
 ) -> bool:
     """Process a single file and return True if successful."""
     try:
         progress.update(
             task_id, description="Processing: {}".format(file_path.name))
 
-        async for result in tidy.tidy_content_batch_stream([(content, tags)], model=model, batch_size=1):
-            if result:
-                if 'journals' in str(file_path):
-                    rel_path = Path('journals') / file_path.name
-                else:
-                    rel_path = Path('pages') / file_path.name
+        # Estimate tokens (rough estimate)
+        estimated_tokens = len(content.split()) * 2  # rough estimate of tokens
 
-                output_file = output_path / rel_path
-                output_file.parent.mkdir(parents=True, exist_ok=True)
-                output_file.write_text(result)
+        # Acquire rate limit
+        await rate_limiter.acquire(estimated_tokens)
+        try:
+            async for result in tidy.tidy_content_batch_stream([(content, tags)], model=model, batch_size=1):
+                if result:
+                    if 'journals' in str(file_path):
+                        rel_path = Path('journals') / file_path.name
+                    else:
+                        rel_path = Path('pages') / file_path.name
 
-                console.print(
-                    "[green]Successfully processed: {}".format(rel_path))
-                progress.update(task_id, advance=1)
-                return True
+                    output_file = output_path / rel_path
+                    output_file.parent.mkdir(parents=True, exist_ok=True)
+                    output_file.write_text(result)
+
+                    console.print(
+                        "[green]Successfully processed: {}".format(rel_path))
+                    progress.update(task_id, advance=1)
+                    return True
+        finally:
+            rate_limiter.release()
 
         raise RuntimeError("No result received for {}".format(file_path.name))
 
@@ -252,6 +315,7 @@ async def process_single_file(
 
 
 async def process_files_with_progress(content_list: List[Tuple[str, Path]], output_path: Path, tags: set, model: str):
+    rate_limiter = RateLimiter(RPM_LIMIT, TPM_LIMIT)
     """Process files with progress monitoring."""
     console = Console()
     total_files = len(content_list)
@@ -287,7 +351,8 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
                     model=model,
                     progress=progress,
                     task_id=file_progress,
-                    console=console
+                    console=console,
+                    rate_limiter=rate_limiter
                 )
                 tasks.append((task, file_path))
 
@@ -335,23 +400,25 @@ def tidy_graph(
         asyncio.run(fetch_model_pricing())
         typer.echo("Model pricing information updated.")
 
-    valid_paths = validate_and_clean_paths(PATHS_FILE)
+    valid_input_paths = validate_and_clean_paths(INPUT_PATHS_FILE)
+    valid_output_paths = validate_and_clean_paths(OUTPUT_PATHS_FILE)
 
     typer.echo("Select a Logseq graph:")
-    if valid_paths:
-        choices = [str(path) for path in valid_paths] + ["[Enter a new path]"]
+    if valid_input_paths:
+        choices = [str(path) for path in valid_input_paths] + \
+            ["[Enter a new path]"]
         selected = questionary.select(
             "Choose a graph or navigate to a new one:", choices=choices
         ).ask()
         if selected == "[Enter a new path]":
             graph_path = select_path_interactively()
-            save_path_to_file(graph_path)
+            save_path_to_file(graph_path, INPUT_PATHS_FILE)
         else:
             graph_path = Path(selected)
     else:
         typer.echo("No valid paths found. Navigate to a Logseq graph.")
         graph_path = select_path_interactively()
-        save_path_to_file(graph_path)
+        save_path_to_file(graph_path, INPUT_PATHS_FILE)
 
     typer.echo("Extracting unique #hashtags and [[backlinks]]...")
     tags = extract_tags(graph_path)
@@ -470,9 +537,34 @@ def tidy_graph(
             raise typer.Exit()
 
     typer.echo("\nProcessing the graph...")
-    output_dir = typer.prompt(
-        "Enter the output directory for the tidied graph")
-    output_path = Path(output_dir).resolve()
+
+    # Show last output path if valid
+    default_output_parent = None
+    if valid_output_paths:
+        last_output = valid_output_paths[-1]
+        if last_output.exists():
+            default_output_parent = last_output.parent
+            typer.echo(f"Last output location: {default_output_parent}")
+
+    # Ask user where to save the output
+    if default_output_parent:
+        use_last = typer.confirm("Use the last output location?", default=True)
+        if use_last:
+            output_parent = default_output_parent
+        else:
+            output_parent = Path(select_path_interactively())
+    else:
+        output_parent = Path(select_path_interactively())
+
+    # Generate output path with timestamp
+    output_name = generate_output_name(graph_path)
+    output_path = output_parent / output_name
+
+    typer.echo(f"\nOutput will be saved to: {output_path}")
+    if not typer.confirm("Proceed with this location?", default=True):
+        output_path = Path(typer.prompt("Enter alternative output path"))
+
+    save_path_to_file(output_path, OUTPUT_PATHS_FILE)
 
     content_list = []
     for dir_name in ['journals', 'pages']:
