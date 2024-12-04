@@ -1,0 +1,14 @@
+{
+	"gpt-4o-mini": {
+		"input": 0.015,
+		"output": 0.025
+	},
+	"gpt-4": {
+		"input": 0.03,
+		"output": 0.06
+	},
+	"gpt-3.5-turbo": {
+		"input": 0.0015,
+		"output": 0.002
+	}
+}

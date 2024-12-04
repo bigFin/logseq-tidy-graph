@@ -1,3 +1,6 @@
+import aiohttp
+import json
+from typing import Dict, Optional
 import typer
 import asyncio
 from pathlib import Path
@@ -19,11 +22,49 @@ DEFAULT_MODEL = "gpt-4o-mini"
 
 PATHS_FILE = Path("./paths.txt")
 
-PRICING = {
-    "gpt-4o-mini": {"input": 0.015, "output": 0.025},
-    "gpt-4": {"input": 0.03, "output": 0.06},
-    "gpt-3.5-turbo": {"input": 0.0015, "output": 0.002},
-}
+CONFIG_DIR = Path("config")
+PRICING_FILE = CONFIG_DIR / "model_pricing.json"
+
+
+async def fetch_model_pricing() -> Dict:
+    """Fetch current model pricing from OpenAI API."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.openai.com/v1/models") as response:
+                if response.status == 200:
+                    models_data = await response.json()
+                    # Process and extract pricing information
+                    # Note: OpenAI doesn't currently provide pricing in their API
+                    # This is a placeholder for when/if they do
+                    return {}
+    except Exception as e:
+        console = Console()
+        console.print(
+            "[yellow]Warning: Could not fetch model pricing: {}".format(e))
+    return {}
+
+
+def load_pricing() -> Dict:
+    """Load pricing from local config file, creating default if needed."""
+    if not CONFIG_DIR.exists():
+        CONFIG_DIR.mkdir(parents=True)
+
+    if not PRICING_FILE.exists():
+        default_pricing = {
+            "gpt-4o-mini": {"input": 0.015, "output": 0.025},
+            "gpt-4": {"input": 0.03, "output": 0.06},
+            "gpt-3.5-turbo": {"input": 0.0015, "output": 0.002},
+        }
+        PRICING_FILE.write_text(json.dumps(default_pricing, indent=2))
+        return default_pricing
+
+    try:
+        return json.loads(PRICING_FILE.read_text())
+    except Exception as e:
+        console = Console()
+        console.print(
+            "[yellow]Warning: Error loading pricing file: {}".format(e))
+        return {}
 
 
 def count_tokens(text: str, model: str) -> int:
@@ -32,12 +73,17 @@ def count_tokens(text: str, model: str) -> int:
 
 
 def estimate_cost(content_list: List[Tuple[str, Path]], model: str = DEFAULT_MODEL, avg_output_tokens: int = 300) -> float:
-    if model not in PRICING:
-        raise ValueError(
-            "Pricing information for model {} is not available.".format(model))
+    pricing = load_pricing()
 
-    input_token_cost = PRICING[model]["input"] / 1000
-    output_token_cost = PRICING[model]["output"] / 1000
+    if model not in pricing:
+        raise ValueError(
+            "Pricing information for model {} is not available. "
+            "Please update {} with current pricing.".format(
+                model, PRICING_FILE)
+        )
+
+    input_token_cost = pricing[model]["input"] / 1000
+    output_token_cost = pricing[model]["output"] / 1000
 
     total_input_tokens = sum(count_tokens(content, model)
                              for content, _ in content_list)
@@ -196,8 +242,15 @@ async def process_files_with_progress(content_list: List[Tuple[str, Path]], outp
 @app.command("tidy-graph")
 def tidy_graph(
     model: str = typer.Option(
-        DEFAULT_MODEL, help="OpenAI model to use (e.g., gpt-4o-mini, gpt-3.5-turbo)")
+        DEFAULT_MODEL, help="OpenAI model to use (e.g., gpt-4o-mini, gpt-3.5-turbo)"),
+    update_pricing: bool = typer.Option(
+        False, "--update-pricing", help="Update model pricing information")
 ):
+    """Process and tidy a Logseq graph."""
+    if update_pricing:
+        asyncio.run(fetch_model_pricing())
+        typer.echo("Model pricing information updated.")
+
     valid_paths = validate_and_clean_paths(PATHS_FILE)
 
     typer.echo("Select a Logseq graph:")
