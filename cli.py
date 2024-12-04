@@ -178,16 +178,67 @@ def tidy_graph(
     for file_path in pages_dir.glob("*.md"):
         content_list.append(file_path.read_text())
 
-    estimated_cost = estimate_cost(content_list, model=model)
+    # Offer to process a sample first
+    total_files = len(content_list)
+    sample_size = min(3, total_files)  # Process up to 3 files as a sample
+    estimated_total_cost = estimate_cost(content_list, model=model)
+    estimated_sample_cost = estimated_total_cost * (sample_size / total_files)
+
+    typer.echo("\nEstimated costs:")
     typer.echo(
-        "Estimated cost of processing this graph with {}: ${:.2f}".format(model, estimated_cost))
+        f"Sample processing ({sample_size} files): ${estimated_sample_cost:.3f}")
+    typer.echo(
+        f"Full graph processing ({total_files} files): ${estimated_total_cost:.2f}")
 
-    confirm = typer.confirm("Do you want to proceed?")
-    if not confirm:
-        typer.echo("Operation cancelled.")
-        raise typer.Exit()
+    try_sample = typer.confirm(
+        "\nWould you like to process a small sample first?")
+    if try_sample:
+        # Create temporary output directory for sample
+        temp_output = Path("./sample_output")
+        temp_output.mkdir(exist_ok=True)
 
-    typer.echo("Processing the graph...")
+        # Select a representative sample (mix of journals and pages if possible)
+        sample_content = []
+        pages_sample = [c for c in content_list if 'pages' in str(
+            c[1])][:sample_size//2]
+        journals_sample = [
+            c for c in content_list if 'journals' in str(c[1])][:sample_size//2]
+        sample_content.extend(pages_sample)
+        sample_content.extend(journals_sample)
+
+        if not sample_content:  # If no split possible, just take first few
+            sample_content = content_list[:sample_size]
+
+        typer.echo("\nProcessing sample files...")
+        asyncio.run(process_files_with_progress(
+            sample_content, temp_output, tags, model))
+
+        # Show sample results
+        typer.echo("\nSample results have been saved to ./sample_output")
+        typer.echo(
+            "Please review the processed files and decide if you want to continue.")
+
+        # Open sample files in default editor if requested
+        if typer.confirm("Would you like to view the processed sample files?"):
+            for _, file_path in sample_content:
+                sample_file = temp_output / \
+                    file_path.relative_to(file_path.parent.parent)
+                typer.launch(str(sample_file))
+
+        proceed = typer.confirm(
+            "\nWould you like to proceed with processing the entire graph?")
+        if not proceed:
+            typer.echo("Operation cancelled.")
+            raise typer.Exit()
+
+    else:
+        proceed = typer.confirm(
+            "\nWould you like to proceed with processing the entire graph?")
+        if not proceed:
+            typer.echo("Operation cancelled.")
+            raise typer.Exit()
+
+    typer.echo("\nProcessing the graph...")
     output_dir = typer.prompt(
         "Enter the output directory for the tidied graph")
     output_path = Path(output_dir).resolve()
