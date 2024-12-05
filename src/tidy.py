@@ -3,6 +3,7 @@ from typing import Set, List, Dict, Tuple, Generator, AsyncGenerator
 import re
 import asyncio
 from itertools import islice
+from .prompts import TIDY_PROMPT
 
 # Initialize the AsyncOpenAI client
 client = AsyncOpenAI()
@@ -41,25 +42,8 @@ async def tidy_content_batch_stream(contents: List[Tuple[str, Set[str]]],
 
             # Prepare prompt for each content
             tags_context = "\n".join(tags)
-            prompt = """
-You are tasked with rewriting a Logseq page into a professional Architectural Decision Record (ADR) style.
-- Organize the content into sections where possible, including:
-  - Title: A concise summary of the decision.
-  - Context: Background and key details about the problem or decision.
-  - Decision: The specific choice or action taken.
-  - Consequences: Any impacts, benefits, or trade-offs resulting from the decision.
-- Preserve and improve [[backlinks]] and #hashtags.
-- Preserve web links
-- Preserve links to local assets and inline images ![image.png](../assets/image.png)
-- Rewrite informal language or personal commentary into a professional tone suitable for sharing.
-- Do not hallucinate
-- Add a #Review tag for content that may still need human attention.
-- Use these extracted tags and backlinks where relevant:
-{}
-
-Content to rewrite:
-{}
-""".format(tags_context, content_without_properties)
+            prompt = TIDY_PROMPT.format(
+                tags_context, content_without_properties)
             prepared_contents.append({"role": "system", "content": prompt})
             preserved_elements.append((properties, queries))
 
@@ -125,25 +109,7 @@ async def tidy_content(content: str, tags: Set[str], model: str = "gpt-4o-mini")
         "", content_without_queries)
 
     # Formulate the prompt
-    prompt = """
-You are tasked with rewriting a Logseq page into a professional Architectural Decision Record (ADR) style. 
-- Organize the content into sections where possible, including:
-  - Title: A concise summary of the decision.
-  - Context: Background and key details about the problem or decision.
-  - Decision: The specific choice or action taken.
-  - Consequences: Any impacts, benefits, or trade-offs resulting from the decision.
-- Preserve the following exactly as written:
-  - Queries: Lines starting with {{query ...}} or query-properties:: must remain unaltered.
-  - Page Properties: Lines like type::, status::, and bucket:: must not be changed.
-- Preserve and improve [[backlinks]] and #hashtags.
-- Rewrite informal language or personal commentary into a professional tone suitable for sharing.
-- Add a #Review tag for content that may still need human attention.
-- Use these extracted tags and backlinks where relevant:
-{}
-
-Content to rewrite:
-{}
-""".format(tags_context, content_without_properties)
+    prompt = TIDY_PROMPT.format(tags_context, content_without_properties)
 
     # Use the batch function with a single item
     async for result in tidy_content_batch_stream([(content, tags)], model=model, batch_size=1):
