@@ -172,7 +172,8 @@ async def process_full_graph(ctx: ProcessingContext) -> None:
     content_with_pages = [(content, path)
                           for content, path in ctx.content_list]
 
-    await process_files_with_progress(
+    # First pass - process all files
+    failed_files = await process_files_with_progress(
         content_list=content_with_pages,
         output_path=ctx.output_path,
         tags=ctx.tags,
@@ -180,6 +181,36 @@ async def process_full_graph(ctx: ProcessingContext) -> None:
         rate_limiter=ctx.rate_limiter,
         pages=ctx.pages
     )
+
+    # Retry failed files with increasing delays
+    max_retries = 3
+    base_delay = 2  # seconds
+
+    retry_attempt = 0
+    while failed_files and retry_attempt < max_retries:
+        retry_attempt += 1
+        delay = base_delay * (2 ** (retry_attempt - 1))  # exponential backoff
+
+        typer.echo(
+            f"\nWaiting {delay} seconds before retry attempt {retry_attempt}...")
+        await asyncio.sleep(delay)
+
+        typer.echo(
+            f"\nRetrying {len(failed_files)} failed files (attempt {retry_attempt}/{max_retries})...")
+        failed_files = await process_files_with_progress(
+            content_list=failed_files,
+            output_path=ctx.output_path,
+            tags=ctx.tags,
+            model=ctx.model,
+            rate_limiter=ctx.rate_limiter,
+            pages=ctx.pages
+        )
+
+    if failed_files:
+        typer.echo(
+            f"\n[yellow]Warning: {len(failed_files)} files could not be processed after {max_retries} retries:")
+        for _, file_path in failed_files:
+            typer.echo(f"  - {file_path}")
 
     # Copy assets
     if copy_assets_folder(ctx.graph_path, ctx.output_path):

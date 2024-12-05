@@ -20,6 +20,7 @@ async def process_single_file(
     rate_limiter: RateLimiter,
     pages: dict = None
 ) -> bool:
+    """Process a single file and return True if successful. Raises exceptions for retry-able errors."""
     """Process a single file and return True if successful."""
     try:
         progress.update(
@@ -64,11 +65,11 @@ async def process_files_with_progress(
     model: str,
     rate_limiter: RateLimiter,
     pages: dict = None
-) -> Tuple[int, List[Path]]:
-    """Process files with progress monitoring. Returns (successful_count, failed_files)."""
+) -> List[Tuple[str, Path]]:
+    """Process files with progress monitoring. Returns list of failed files with their content."""
     if pages is None:
         pages = {}
-    """Process files with progress monitoring. Returns (successful_count, failed_files)."""
+
     console = Console()
     total_files = len(content_list)
     successful_files = 0
@@ -110,25 +111,44 @@ async def process_files_with_progress(
                 )
                 tasks.append((task, file_path))
 
+            # Process batch with rate limit handling
             results = await asyncio.gather(*(task for task, _ in tasks), return_exceptions=True)
 
             for (_, file_path), result in zip(tasks, results):
+                content = next(c for c, p in content_list if p == file_path)
                 if isinstance(result, Exception):
-                    console.print(
-                        f"[red]Error processing {file_path}: {str(result)}")
-                    failed_files.append(file_path)
+                    error_msg = str(result)
+                    if "rate_limit_exceeded" in error_msg:
+                        # Extract wait time from error message if available
+                        import re
+                        wait_time = 2.0  # default wait time
+                        match = re.search(
+                            r'try again in (\d+\.?\d*)s', error_msg)
+                        if match:
+                            wait_time = float(match.group(1))
+                        console.print(
+                            f"[yellow]Rate limit hit for {file_path}. Will retry later.")
+                        await asyncio.sleep(wait_time)
+                        failed_files.append((content, file_path))
+                    else:
+                        console.print(
+                            f"[red]Error processing {file_path}: {error_msg}")
+                        failed_files.append((content, file_path))
                 elif result:
                     successful_files += 1
                 else:
-                    failed_files.append(file_path)
+                    failed_files.append((content, file_path))
 
                 progress.update(overall_progress, advance=1)
 
             if len(failed_files) > 0 and (i + batch_size) < len(content_list):
                 if not typer.confirm("\nContinue processing remaining files?", default=True):
-                    raise typer.Abort("Processing cancelled by user")
+                    # Return both processed and unprocessed failed files
+                    remaining = [(c, p)
+                                 for c, p in content_list[i+batch_size:]]
+                    return failed_files + remaining
 
-    return successful_files, failed_files
+    return failed_files
 
 
 def collect_content_list(graph_path: Path) -> List[Tuple[str, Path]]:
