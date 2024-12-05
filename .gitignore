@@ -1,4 +1,5 @@
 sample_output
 paths.txt
 venv
+*paths.txt
 	
