@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass, replace
 from typing import List, Tuple, Optional, Dict
 from pathlib import Path
@@ -216,22 +217,46 @@ def display_metadata_stats(ctx: ProcessingContext, metadata_dir: Path) -> None:
     )
 
 
-def handle_tidy_graph_command(
+async def select_input_graph(valid_input_paths: List[Path]) -> Path:
+    """Select input graph path either from history or by browsing."""
+    if valid_input_paths:
+        use_existing = await questionary.confirm(
+            "Would you like to select from previously used graphs?",
+            default=True
+        ).ask_async()
+
+        if use_existing:
+            choices = [str(p) for p in valid_input_paths] + \
+                ["[Browse for new location]"]
+            selected = await questionary.select(
+                "Select input graph location:",
+                choices=choices
+            ).ask_async()
+
+            if selected != "[Browse for new location]":
+                return Path(selected)
+
+    typer.echo("Please select the Logseq graph directory to process...")
+    return await select_path_interactively()
+
+
+async def handle_tidy_graph_command(
     model: str = DEFAULT_MODEL,
     update_pricing: bool = False,
     input_paths_file: Path = Path("./input_paths.txt"),
     output_paths_file: Path = Path("./output_paths.txt")
 ) -> None:
-    """Handle the tidy-graph command logic."""
+    """Implementation of the tidy-graph command logic."""
+
     # Update pricing if requested
     if update_pricing:
-        asyncio.run(fetch_model_pricing())
+        await fetch_model_pricing()
         typer.echo("Model pricing information updated.")
 
     # Initialize paths and context
     valid_input_paths = validate_and_clean_paths(input_paths_file)
 
-    graph_path = select_input_graph(valid_input_paths)
+    graph_path = await select_input_graph(valid_input_paths)
     save_path_to_file(graph_path, input_paths_file)
 
     # Create processing context
@@ -257,11 +282,11 @@ def handle_tidy_graph_command(
     )
 
     # Handle sample processing
-    if typer.confirm("\nWould you like to process a small sample first?"):
-        if not asyncio.run(process_sample(ctx, sample_size)):
+    if await questionary.confirm("\nWould you like to process a small sample first?").ask_async():
+        if not await process_sample(ctx, sample_size):
             typer.echo("Operation cancelled.")
             raise typer.Exit()
-    elif not typer.confirm("\nWould you like to proceed with processing the entire graph?"):
+    elif not await questionary.confirm("\nWould you like to proceed with processing the entire graph?").ask_async():
         typer.echo("Operation cancelled.")
         raise typer.Exit()
 
@@ -273,27 +298,4 @@ def handle_tidy_graph_command(
     ctx = replace(ctx, output_path=output_path)
 
     # Process the full graph
-    asyncio.run(process_full_graph(ctx))
-
-
-def select_input_graph(valid_input_paths: List[Path]) -> Path:
-    """Select input graph path either from history or by browsing."""
-    if valid_input_paths:
-        use_existing = questionary.confirm(
-            "Would you like to select from previously used graphs?",
-            default=True
-        ).ask()
-
-        if use_existing:
-            choices = [str(p) for p in valid_input_paths] + \
-                ["[Browse for new location]"]
-            selected = questionary.select(
-                "Select input graph location:",
-                choices=choices
-            ).ask()
-
-            if selected != "[Browse for new location]":
-                return Path(selected)
-
-    typer.echo("Please select the Logseq graph directory to process...")
-    return select_path_interactively()
+    await process_full_graph(ctx)

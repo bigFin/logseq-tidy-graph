@@ -1,21 +1,10 @@
 import sys
 import asyncio
-import typer
 from typing import Optional
+import typer
 from src.command_handler import handle_tidy_graph_command, DEFAULT_MODEL
 
 app = typer.Typer(no_args_is_help=True)
-
-
-def run_async(coro):
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
 
 
 @app.command(name="tidy-graph", help="Process and tidy a Logseq graph")
@@ -27,13 +16,26 @@ def tidy_graph(
 ) -> None:
     """Process and tidy a Logseq graph."""
     try:
-        run_async(handle_tidy_graph_command(model, update_pricing))
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(
+                asyncio.WindowsSelectorEventLoopPolicy())
+
+        # Create new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # Run the async command
+        loop.run_until_complete(
+            handle_tidy_graph_command(model, update_pricing))
+
     except KeyboardInterrupt:
         typer.echo("\nOperation cancelled by user")
         raise typer.Exit(1)
     except Exception as e:
         typer.echo(f"\nError: {str(e)}", err=True)
         raise typer.Exit(1)
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":

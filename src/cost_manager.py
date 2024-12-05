@@ -65,7 +65,7 @@ class RateLimiter:
 
         # Acquire semaphore for parallel request limiting
         try:
-            await asyncio.wait_for(self.semaphore.acquire(), timeout=30.0)
+            await asyncio.wait_for(self.semaphore.acquire(), timeout=60.0)
         except asyncio.TimeoutError:
             # Remove the recorded request if we timeout
             self.requests.pop()
