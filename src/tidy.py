@@ -1,5 +1,7 @@
 from openai import AsyncOpenAI
-from typing import Set, List, Dict, Tuple, Generator, AsyncGenerator
+from typing import Set, List, Dict, Tuple, Generator, AsyncGenerator, Optional
+from pathlib import Path
+from .processor import PageInfo
 import re
 import asyncio
 from itertools import islice
@@ -9,9 +11,11 @@ from .prompts import TIDY_PROMPT
 client = AsyncOpenAI()
 
 
-async def tidy_content_batch_stream(contents: List[Tuple[str, Set[str]]],
-                                    model: str = "gpt-4o-mini",
-                                    batch_size: int = 20) -> AsyncGenerator[str, None]:
+async def tidy_content_batch_stream(
+    contents: List[Tuple[str, Set[str], Dict[str, PageInfo]]],
+    model: str = "gpt-4o-mini",
+    batch_size: int = 20
+) -> AsyncGenerator[str, None]:
     """
     Batch process multiple Logseq page contents using OpenAI GPT model.
 
@@ -26,7 +30,7 @@ async def tidy_content_batch_stream(contents: List[Tuple[str, Set[str]]],
         prepared_contents = []
         preserved_elements = []
 
-        for content, tags in batch_contents:
+        for content, tags, pages in batch_contents:
             # Extract and preserve queries and page properties using regex
             query_pattern = re.compile(
                 r"query-properties::.*|{{query.*}}", re.MULTILINE)
@@ -42,8 +46,28 @@ async def tidy_content_batch_stream(contents: List[Tuple[str, Set[str]]],
 
             # Prepare prompt for each content
             tags_context = "\n".join(tags)
+
+            # Format pages information
+            pages_context = []
+            for page_name, page_info in pages.items():
+                page_type = []
+                if page_info.is_overview:
+                    page_type.append("Overview/MOC")
+                if page_info.is_query:
+                    page_type.append("Query")
+                if page_info.tags:
+                    page_type.append(f"Tags: {', '.join(page_info.tags)}")
+
+                page_desc = f"[[{page_name}]] - {' | '.join(page_type)}"
+                pages_context.append(page_desc)
+
+            pages_context_str = "\n".join(pages_context)
+
             prompt = TIDY_PROMPT.format(
-                tags_context, content_without_properties)
+                tags_context,
+                pages_context_str,
+                content_without_properties
+            )
             prepared_contents.append({"role": "system", "content": prompt})
             preserved_elements.append((properties, queries))
 
@@ -79,7 +103,12 @@ async def tidy_content_batch_stream(contents: List[Tuple[str, Set[str]]],
             yield result
 
 
-async def tidy_content(content: str, tags: Set[str], model: str = "gpt-4o-mini") -> str:
+async def tidy_content(
+    content: str,
+    tags: Set[str],
+    pages: Dict[str, PageInfo],
+    model: str = "gpt-4o-mini"
+) -> str:
     """
     Use OpenAI GPT-4o-mini (or specified model) to tidy up Logseq page content, including relevant tags, 
     while preserving queries and page properties.
@@ -112,5 +141,5 @@ async def tidy_content(content: str, tags: Set[str], model: str = "gpt-4o-mini")
     prompt = TIDY_PROMPT.format(tags_context, content_without_properties)
 
     # Use the batch function with a single item
-    async for result in tidy_content_batch_stream([(content, tags)], model=model, batch_size=1):
+    async for result in tidy_content_batch_stream([(content, tags, pages)], model=model, batch_size=1):
         return result

@@ -1,64 +1,145 @@
-import typer
-import asyncio
+from dataclasses import dataclass, replace
+from typing import List, Tuple, Optional, Dict
 from pathlib import Path
-from typing import List, Tuple
+import asyncio
+import typer
 import questionary
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
 from .ui_helper import (
-    save_path_to_file, generate_output_name,
-    select_path_interactively, display_cost_estimates
+    save_path_to_file,
+    generate_output_name,
+    select_path_interactively,
+    display_cost_estimates
 )
 from .file_processor import (
-    process_files_with_progress, collect_content_list,
+    process_files_with_progress,
+    collect_content_list,
     copy_assets_folder
 )
 from .cost_manager import (
-    RateLimiter, fetch_model_pricing, load_pricing,
+    RateLimiter,
+    fetch_model_pricing,
+    load_pricing,
     estimate_cost
 )
-from .processor import process_graph, extract_tags, save_tags_to_file
+from .processor import (
+    process_graph,
+    extract_tags,
+    save_tags_to_file,
+    extract_pages,
+    save_pages_info,
+    PageInfo
+)
 
 from .validator import validate_and_clean_paths
 
+from .cost_manager import RPM_LIMIT, TPM_LIMIT, MAX_PARALLEL_REQUESTS
+
 DEFAULT_MODEL = "gpt-4o-mini"
 
+SAMPLE_SIZE = 3
 
-async def process_sample(
-    content_list: List[Tuple[str, Path]],
-    sample_size: int,
-    tags: set,
+
+@dataclass
+class ProcessingContext:
+    """Contains all necessary context for processing a graph."""
+    graph_path: Path
+    output_path: Path
+    content_list: List[Tuple[str, Path]]
+    tags: set
+    pages: Dict[str, PageInfo]
     model: str
-) -> bool:
-    """Process a sample of files and return whether to continue."""
-    temp_output = Path("./sample_output")
-    temp_output.mkdir(exist_ok=True)
+    rate_limiter: RateLimiter
 
-    sample_content = []
+
+def get_sample_content(
+    content_list: List[Tuple[str, Path]],
+    sample_size: int
+) -> List[Tuple[str, Path]]:
+    """Get a balanced sample of pages and journals."""
     pages_sample = [c for c in content_list if 'pages' in str(
         c[1].parent)][:sample_size//2]
     journals_sample = [c for c in content_list if 'journals' in str(
         c[1].parent)][:sample_size//2]
 
     if not pages_sample and not journals_sample:
-        sample_content = content_list[:sample_size]
-    else:
-        sample_content.extend(pages_sample)
-        remaining_slots = sample_size - len(sample_content)
-        if remaining_slots > 0:
-            sample_content.extend(journals_sample[:remaining_slots])
+        return content_list[:sample_size]
 
-    if not sample_content:
-        sample_content = content_list[:sample_size]
+    sample_content = []
+    sample_content.extend(pages_sample)
+    remaining_slots = sample_size - len(sample_content)
+    if remaining_slots > 0:
+        sample_content.extend(journals_sample[:remaining_slots])
 
-    typer.echo("\nProcessing sample files...")
-    rate_limiter = RateLimiter(500, 150000)  # RPM and TPM limits
-    await process_files_with_progress(
-        content_list=sample_content,
-        output_path=temp_output,
+    return sample_content if sample_content else content_list[:sample_size]
+
+
+def create_processing_context(
+    graph_path: Path,
+    model: str,
+    output_path: Optional[Path] = None
+) -> ProcessingContext:
+    """Create a processing context with all necessary data."""
+    tags = extract_tags(graph_path)
+    pages = extract_pages(graph_path)
+    content_list = collect_content_list(graph_path)
+
+    # Create rate limiter with default settings from cost_manager
+    rate_limiter = RateLimiter(
+        rpm_limit=RPM_LIMIT,
+        tpm_limit=TPM_LIMIT,
+        max_parallel=MAX_PARALLEL_REQUESTS
+    )
+
+    return ProcessingContext(
+        graph_path=graph_path,
+        output_path=output_path or graph_path,
+        content_list=content_list,
         tags=tags,
+        pages=pages,
         model=model,
         rate_limiter=rate_limiter
+    )
+
+
+def save_metadata(ctx: ProcessingContext) -> Path:
+    """Save metadata (tags and pages info) to disk."""
+    metadata_dir = ctx.graph_path / "metadata"
+    metadata_dir.mkdir(exist_ok=True)
+
+    # Save tags
+    tags_file = metadata_dir / "tags.txt"
+    save_tags_to_file(ctx.tags, tags_file)
+
+    # Save pages info
+    save_pages_info(ctx.pages, metadata_dir)
+
+    return metadata_dir
+
+
+async def process_sample(
+    ctx: ProcessingContext,
+    sample_size: int
+) -> bool:
+    """Process a sample of files and return whether to continue."""
+    temp_output = Path("./sample_output")
+    temp_output.mkdir(exist_ok=True)
+
+    sample_content = get_sample_content(ctx.content_list, sample_size)
+
+    typer.echo("\nProcessing sample files...")
+
+    # Convert content list to include pages context
+    content_with_pages = [(content, path) for content, path in sample_content]
+
+    await process_files_with_progress(
+        content_list=content_with_pages,
+        output_path=temp_output,
+        tags=ctx.tags,
+        model=ctx.model,
+        rate_limiter=ctx.rate_limiter,
+        pages=ctx.pages
     )
 
     typer.echo("\nSample results have been saved to ./sample_output")
@@ -83,58 +164,31 @@ async def process_sample(
     return typer.confirm("\nWould you like to proceed with processing the entire graph?")
 
 
-def handle_tidy_graph_command(
-    model: str = DEFAULT_MODEL,
-    update_pricing: bool = False,
-    input_paths_file: Path = Path("./input_paths.txt"),
-    output_paths_file: Path = Path("./output_paths.txt")
-) -> None:
-    """Handle the tidy-graph command logic."""
+async def process_full_graph(ctx: ProcessingContext) -> None:
+    """Process the entire graph."""
+    typer.echo("\nProcessing the graph...")
+    # Convert content list to include pages context
+    content_with_pages = [(content, path)
+                          for content, path in ctx.content_list]
 
-    valid_input_paths = validate_and_clean_paths(input_paths_file)
-    valid_output_paths = validate_and_clean_paths(output_paths_file)
+    await process_files_with_progress(
+        content_list=content_with_pages,
+        output_path=ctx.output_path,
+        tags=ctx.tags,
+        model=ctx.model,
+        rate_limiter=ctx.rate_limiter,
+        pages=ctx.pages
+    )
 
-    # Select input graph
-    graph_path = select_input_graph(valid_input_paths)
-    save_path_to_file(graph_path, input_paths_file)
+    # Copy assets
+    if copy_assets_folder(ctx.graph_path, ctx.output_path):
+        typer.echo("Assets folder copied successfully")
 
-    # Extract and save tags
-    typer.echo("Extracting unique #hashtags and [[backlinks]]...")
-    tags = extract_tags(graph_path)
-    tags_file = graph_path / "tags.txt"
-    save_tags_to_file(tags, tags_file)
-    typer.echo("Extracted tags have been saved to {}".format(tags_file))
+    typer.echo("Tidied graph has been saved to {}".format(ctx.output_path))
 
-    # Collect content and estimate costs
-    content_list = collect_content_list(graph_path)
-    total_files = len(content_list)
-    sample_size = min(3, total_files)
 
-    # Calculate different cost scenarios
-    standard_cost = estimate_cost(content_list, model, use_batch=False)
-    batch_cost = estimate_cost(content_list, model, use_batch=True)
-    cached_cost = estimate_cost(
-        content_list, model, use_batch=True, assume_cached=True)
-    pricing = load_pricing()
-
-    display_cost_estimates(standard_cost, batch_cost, cached_cost,
-                           total_files, sample_size, model, pricing)
-
-    # Handle sample processing
-    if typer.confirm("\nWould you like to process a small sample first?"):
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            if not loop.run_until_complete(process_sample(content_list, sample_size, tags, model)):
-                typer.echo("Operation cancelled.")
-                raise typer.Exit()
-        finally:
-            loop.close()
-    elif not typer.confirm("\nWould you like to proceed with processing the entire graph?"):
-        typer.echo("Operation cancelled.")
-        raise typer.Exit()
-
-    # Generate output path
+def generate_output_path(graph_path: Path) -> Path:
+    """Generate a unique output path for the processed graph."""
     output_name = generate_output_name(graph_path)
     output_base = graph_path.parent / output_name
     output_path = output_base
@@ -145,25 +199,81 @@ def handle_tidy_graph_command(
             "{}_{}".format(output_base.name, counter)
         counter += 1
 
-    # Create output directory
     output_path.mkdir(parents=True, exist_ok=True)
+    return output_path
+
+
+def display_metadata_stats(ctx: ProcessingContext, metadata_dir: Path) -> None:
+    """Display statistics about the extracted metadata."""
+    typer.echo("Metadata extracted and saved to {}/".format(metadata_dir))
+    typer.echo("Found {} unique tags and {} pages".format(
+        len(ctx.tags), len(ctx.pages)))
+    typer.echo(
+        "Including {} queries and {} overview pages".format(
+            sum(1 for p in ctx.pages.values() if p.is_query),
+            sum(1 for p in ctx.pages.values() if p.is_overview)
+        )
+    )
+
+
+def handle_tidy_graph_command(
+    model: str = DEFAULT_MODEL,
+    update_pricing: bool = False,
+    input_paths_file: Path = Path("./input_paths.txt"),
+    output_paths_file: Path = Path("./output_paths.txt")
+) -> None:
+    """Handle the tidy-graph command logic."""
+    # Update pricing if requested
+    if update_pricing:
+        asyncio.run(fetch_model_pricing())
+        typer.echo("Model pricing information updated.")
+
+    # Initialize paths and context
+    valid_input_paths = validate_and_clean_paths(input_paths_file)
+
+    graph_path = select_input_graph(valid_input_paths)
+    save_path_to_file(graph_path, input_paths_file)
+
+    # Create processing context
+    ctx = create_processing_context(graph_path, model)
+
+    # Save and display metadata
+    metadata_dir = save_metadata(ctx)
+    display_metadata_stats(ctx, metadata_dir)
+
+    # Display cost estimates
+    total_files = len(ctx.content_list)
+    sample_size = min(SAMPLE_SIZE, total_files)
+
+    standard_cost = estimate_cost(ctx.content_list, ctx.model, use_batch=False)
+    batch_cost = estimate_cost(ctx.content_list, ctx.model, use_batch=True)
+    cached_cost = estimate_cost(
+        ctx.content_list, ctx.model, use_batch=True, assume_cached=True)
+    pricing = load_pricing()
+
+    display_cost_estimates(
+        standard_cost, batch_cost, cached_cost,
+        total_files, sample_size, ctx.model, pricing
+    )
+
+    # Handle sample processing
+    if typer.confirm("\nWould you like to process a small sample first?"):
+        if not asyncio.run(process_sample(ctx, sample_size)):
+            typer.echo("Operation cancelled.")
+            raise typer.Exit()
+    elif not typer.confirm("\nWould you like to proceed with processing the entire graph?"):
+        typer.echo("Operation cancelled.")
+        raise typer.Exit()
+
+    # Setup output path
+    output_path = generate_output_path(graph_path)
     save_path_to_file(output_path, output_paths_file)
 
-    # Process files
-    typer.echo("\nProcessing the graph...")
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(process_files(
-            content_list, output_path, tags, model))
-    finally:
-        loop.close()
+    # Update context with output path
+    ctx = replace(ctx, output_path=output_path)
 
-    # Copy assets
-    if copy_assets_folder(graph_path, output_path):
-        typer.echo("Assets folder copied successfully")
-
-    typer.echo("Tidied graph has been saved to {}".format(output_path))
+    # Process the full graph
+    asyncio.run(process_full_graph(ctx))
 
 
 def select_input_graph(valid_input_paths: List[Path]) -> Path:
@@ -187,16 +297,3 @@ def select_input_graph(valid_input_paths: List[Path]) -> Path:
 
     typer.echo("Please select the Logseq graph directory to process...")
     return select_path_interactively()
-
-
-async def process_files(content_list: List[Tuple[str, Path]], output_path: Path,
-                        tags: set, model: str) -> None:
-    """Process all files with rate limiting."""
-    rate_limiter = RateLimiter(500, 150000)  # RPM and TPM limits
-    await process_files_with_progress(
-        content_list=content_list,
-        output_path=output_path,
-        tags=tags,
-        model=model,
-        rate_limiter=rate_limiter
-    )

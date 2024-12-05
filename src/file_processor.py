@@ -17,7 +17,8 @@ async def process_single_file(
     progress,
     task_id,
     console: Console,
-    rate_limiter: RateLimiter
+    rate_limiter: RateLimiter,
+    pages: dict = None
 ) -> bool:
     """Process a single file and return True if successful."""
     try:
@@ -30,7 +31,7 @@ async def process_single_file(
         # Acquire rate limit
         await rate_limiter.acquire(estimated_tokens)
         try:
-            async for result in tidy.tidy_content_batch_stream([(content, tags)], model=model, batch_size=1):
+            async for result in tidy.tidy_content_batch_stream([(content, tags, pages or {})], model=model, batch_size=1):
                 if result:
                     if 'journals' in str(file_path):
                         rel_path = Path('journals') / file_path.name
@@ -61,8 +62,12 @@ async def process_files_with_progress(
     output_path: Path,
     tags: Set[str],
     model: str,
-    rate_limiter: RateLimiter
+    rate_limiter: RateLimiter,
+    pages: dict = None
 ) -> Tuple[int, List[Path]]:
+    """Process files with progress monitoring. Returns (successful_count, failed_files)."""
+    if pages is None:
+        pages = {}
     """Process files with progress monitoring. Returns (successful_count, failed_files)."""
     console = Console()
     total_files = len(content_list)
@@ -90,6 +95,7 @@ async def process_files_with_progress(
 
             tasks = []
             for content, file_path in batch:
+                # Create a task for processing each file
                 task = process_single_file(
                     content=content,
                     file_path=file_path,
@@ -99,7 +105,8 @@ async def process_files_with_progress(
                     progress=progress,
                     task_id=file_progress,
                     console=console,
-                    rate_limiter=rate_limiter
+                    rate_limiter=rate_limiter,
+                    pages=pages
                 )
                 tasks.append((task, file_path))
 
