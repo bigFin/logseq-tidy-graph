@@ -2,7 +2,7 @@
 
 A CLI tool to professionalize and enhance Logseq graph contents using AI.
 
-    ## Features
+## Features
 
 - **Smart Graph Processing**
   - Interactive filesystem navigation for graph selection
